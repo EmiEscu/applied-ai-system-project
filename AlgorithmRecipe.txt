@@ -1,0 +1,126 @@
+MUSIC RECOMMENDER — SCORING ALGORITHM RECIPE
+=============================================
+
+INPUT
+-----
+songs.csv is loaded via load_songs() using a relative path resolved at runtime:
+  os.path.join(os.path.dirname(__file__), "..", "data", "songs.csv")
+
+A user taste profile dict with these fields:
+  - genre           (str)   e.g. "lofi"   — categorical
+  - mood            (str)   e.g. "chill"  — categorical
+  - energy          (float) 0.0 – 1.0     — 0 = passive, 1 = intense
+  - tempo           (float) BPM           — e.g. 80.0 (normalized internally)
+  - valence         (float) 0.0 – 1.0     — 0 = dark/sad, 1 = bright/happy
+  - danceability    (float) 0.0 – 1.0     — 0 = not danceable, 1 = very danceable
+  - acousticness    (float) 0.0 – 1.0     — 0 = electronic, 1 = fully acoustic
+
+
+IMPORTANT: NO HARD FILTERS
+---------------------------
+Every song in the catalog is scored. A song that misses on genre and mood
+still receives numeric similarity points. No song is dropped before scoring.
+This ensures sonically close songs always surface even without a label match.
+
+
+STEP 1 — CATEGORICAL BONUSES (binary, additive)
+------------------------------------------------
+These fire or they don't — no partial credit.
+
+  IF song.genre == user_prefs["genre"]  →  score += 2.0
+  IF song.mood  == user_prefs["mood"]   →  score += 1.5
+
+  Max from this step: 3.5
+
+
+STEP 2 — CONTINUOUS SIMILARITY SCORING
+---------------------------------------
+For each numeric feature, compute raw similarity:
+
+  similarity = 1.0 - abs(song_value - target_value)
+
+  Returns 1.0 on a perfect match, 0.0 when maximally apart.
+
+  EXCEPTION — tempo must be normalized before differencing:
+    sim_tempo = 1.0 - abs(song.tempo_bpm / 200.0 - target_tempo / 200.0)
+  Without this, raw BPM differences (58–180) would dwarf all other features.
+
+Then multiply each similarity by its weight:
+
+  Feature         Weight   Rationale
+  -----------     ------   ------------------------------------------------
+  energy           1.5     Widest useful spread in catalog (0.21–0.97);
+                           single strongest numeric genre separator
+  acousticness     1.2     Nearly full 0–1 range; cleanly splits electric
+                           (rock/metal/electronic) from acoustic (folk/jazz/lofi)
+  valence          0.8     Emotional tone; partially redundant with mood label,
+                           so moderate weight
+  tempo            0.8     Strong feel indicator, but normalized first (÷200)
+  danceability     0.5     Weakest separator — largely correlated with energy;
+                           lowest weight
+
+  Max from this step: 1.5 + 1.2 + 0.8 + 0.8 + 0.5 = 4.8
+
+
+STEP 3 — TOTAL SCORE
+---------------------
+  score = categorical_bonuses + weighted_numeric_similarities
+
+  Maximum possible score ≈ 8.3
+    (2.0 genre + 1.5 mood + 1.5 energy + 1.2 acousticness
+     + 0.8 valence + 0.8 tempo + 0.5 danceability)
+
+  Scores are rounded to 3 decimal places.
+
+
+STEP 4 — EXPLANATION GENERATION
+---------------------------------
+  Each call to score_song() also builds a human-readable explanation.
+  A feature is mentioned in the explanation only if its similarity is
+  strong enough to be noteworthy:
+
+    energy, acousticness, valence, danceability  →  sim >= 0.85
+    tempo                                         →  sim >= 0.90
+
+  If no feature clears the threshold, the explanation reads:
+    "Partial numeric similarity to your profile"
+
+
+STEP 5 — RANK & RETURN
+-----------------------
+  All 20 scored tuples (song, score, explanation) are sorted DESCENDING
+  by score. The top k results are returned (default k = 5).
+
+
+EXAMPLE WALKTHROUGH
+-------------------
+Taste profile: genre=lofi, mood=chill, energy=0.25, tempo=80,
+               valence=0.50, danceability=0.55, acousticness=0.70
+
+  Song              Genre   Mood     Cat.   Energy sim   Acousticness sim   Final score (approx)
+  ----------------  ------  -------  -----  -----------  -----------------  --------------------
+  Library Rain      lofi    chill    +3.5   1-(|0.35-0.25|)=0.90 ×1.5=1.35  1-(|0.86-0.70|)=0.84 ×1.2=1.01  ~7.2
+  Midnight Coding   lofi    chill    +3.5   1-(|0.42-0.25|)=0.83 ×1.5=1.25  1-(|0.71-0.70|)=0.99 ×1.2=1.19  ~7.3
+  Focus Flow        lofi    focused  +2.0   1-(|0.40-0.25|)=0.85 ×1.5=1.28  1-(|0.78-0.70|)=0.92 ×1.2=1.10  ~5.9
+  Spacewalk Thoughts ambient chill   +1.5   1-(|0.28-0.25|)=0.97 ×1.5=1.46  1-(|0.92-0.70|)=0.78 ×1.2=0.94  ~5.4
+
+  Result: Midnight Coding ranked #1, Library Rain #2 — both genre+mood
+  matched. Focus Flow ranks third on numeric strength despite missing mood.
+
+
+KEY DESIGN DECISIONS
+--------------------
+1. No hard filters — every song is scored. Genre/mood misses cost points
+   (no +2.0 or +1.5) but don't disqualify. A great sonic match still surfaces.
+
+2. Mood weight raised to 1.5 (not 1.0) — "focused" vs "chill" lofi is a
+   meaningful distinction even when audio features are nearly identical.
+
+3. Tempo normalization is mandatory — raw BPM (58–180) vs 0–1 features
+   would let tempo alone dominate the entire numeric score.
+
+4. Energy is the top numeric weight (1.5) — it has the widest spread in
+   this catalog and is the strongest predictor of genre character.
+
+5. Danceability is the lowest weight (0.5) — it closely tracks energy
+   and adds minimal independent signal.

@@ -17,17 +17,40 @@ Replace this paragraph with your own summary of what your version does.
 
 ## How The System Works
 
-Explain your design in plain language.
+There are two ways that music recommending systems work, we have the collaborative filtering and the content-based filtering. Collaborative filtering work by using other users as a way to recommend a song. For example, if two users have the similar task in music such as they both like Lady Gaga, Bad Bunny, and Rock, then if User A likes Bruno Mars, than there is a high chance that User B will also enjoy Bruno Mars. Then there is content-based filtering which uses the audio characteristics of a song to provide a personal recommendation, such as tempo, mood, genre, danceability, etc. Since this project doesnt more than one user the method to recommend songs will be content-based were the characteristics of a song will determine whether it will be recommended or not. 
+
+
 
 Some prompts to answer:
 
 - What features does each `Song` use in your system
-  - For example: genre, mood, energy, tempo
+  - genre, mood, energy, tempo_bpm, valence, danceability, and acousticness
 - What information does your `UserProfile` store
+  - The taste profile stores the user's target values for every feature: a preferred genre label, a preferred mood label, and numeric targets for energy, tempo, valence, danceability, and acousticness.
 - How does your `Recommender` compute a score for each song
+  - Every song in the catalog is scored — no song is dropped early. A song that misses on genre and mood still receives numeric similarity points, so sonically close songs always surface.
+  - **Step 1 — Categorical bonuses (binary):** If the song's genre exactly matches the user's preferred genre, add +2.0. If the mood matches, add +1.5. These fire or they don't; there is no partial credit.
+  - **Step 2 — Continuous similarity:** For each numeric feature, compute `similarity = 1.0 − |song_value − target_value|`. This gives 1.0 for a perfect match and 0.0 when the values are as far apart as possible.
+  - **Step 3 — Weighted sum:** Multiply each similarity by its feature weight and add to the score. Weights reflect how strongly each feature separates genres in the catalog:
+    ```
+    energy        × 1.5   (widest spread: 0.21–0.97)
+    acousticness  × 1.2   (covers full range; separates electric from acoustic)
+    valence       × 0.8   (emotional tone; partially overlaps with mood label)
+    tempo         × 0.8   (normalized ÷ 200 first, or raw BPM would dominate)
+    danceability  × 0.5   (weakest separator; correlated with energy)
+    ```
+  - **Max possible score ≈ 8.3** (genre match 2.0 + mood match 1.5 + all five numeric features at perfect similarity).
 - How do you choose which songs to recommend
+  - All 20 scored tuples are sorted in descending order by score. The top `k` (default 5) are returned. The song closest to the user's full taste profile — across both categorical and numeric dimensions — ranks first.
 
-You can include a simple diagram or bullet list if helpful.
+
+
+
+Some biases of this system is that Genre could be over prioritized, meaning that other features might be shadowed and effect the user recommendation. This is also an issue especially if the user want something that sounds similar to a genre, but isnt really that genre. 
+
+![Top 10 Recommendations](img/top10.png)
+
+
 
 ---
 

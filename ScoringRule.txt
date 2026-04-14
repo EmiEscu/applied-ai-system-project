@@ -1,0 +1,84 @@
+MUSIC RECOMMENDER — SCORING RULE
+=================================
+
+STEP 1 — HARD FILTER (categorical gates)
+-----------------------------------------
+Before any scoring, eliminate songs that don't match the user's genre and mood.
+Only songs that pass BOTH checks are scored.
+
+    Keep song if:
+        song.genre == user.genre   AND   song.mood == user.mood
+
+This prevents an irrelevant song from sneaking into the top results just because
+its numeric features happen to be close.
+
+
+STEP 2 — NORMALIZE TEMPO
+--------------------------
+Energy, valence, danceability, and acousticness are already on [0, 1].
+Tempo is on [50, 200] and must be scaled down before it can be compared fairly.
+
+    normalized_tempo = (tempo_bpm - 50) / 150
+
+Apply this to both the candidate song and the user's target tempo.
+
+
+STEP 3 — PROXIMITY SCORE PER FEATURE
+--------------------------------------
+For each numeric feature, compute how close the song's value is to the user's
+target. A perfect match returns 1.0; a maximum mismatch returns 0.0.
+
+    proximity(song_val, target_val) = 1 - |song_val - target_val|
+
+This rewards closeness symmetrically. A user who prefers low energy (0.2) is
+served just as correctly as one who prefers high energy (0.9).
+
+
+STEP 4 — WEIGHTED SUM
+-----------------------
+Combine the five proximity scores using weights that reflect how strongly each
+feature drives listening satisfaction.
+
+    Weights (must sum to 1.0):
+        energy        = 0.30   <- strong emotional signal
+        valence       = 0.30   <- strong emotional signal
+        danceability  = 0.20   <- secondary texture
+        acousticness  = 0.10   <- secondary texture
+        tempo         = 0.10   <- secondary texture
+
+    raw_score = (0.30 * proximity(energy))
+              + (0.30 * proximity(valence))
+              + (0.20 * proximity(danceability))
+              + (0.10 * proximity(acousticness))
+              + (0.10 * proximity(tempo_normalized))
+
+Because weights sum to 1 and each proximity value is in [0, 1],
+raw_score is guaranteed to be in [0, 1].
+
+
+STEP 5 — SCALE TO 0–100
+------------------------
+    final_score = raw_score * 100
+
+Songs are then ranked highest-to-lowest. The top-k are returned.
+
+
+WHY WEIGHTED SUM (not cosine similarity or dot product)?
+---------------------------------------------------------
+- Cosine similarity measures the angle between vectors, not the distance.
+  A song at [0.9, 0.9] and one at [0.1, 0.1] would score identically because
+  they point in the same direction — that's wrong for taste matching.
+
+- Dot product is unbounded and rewards large values regardless of the target.
+
+- Weighted sum of proximities directly answers: "how close is each feature to
+  what the user wants?" The weights are transparent and easy to tune. The
+  output is immediately interpretable as a percentage-style score.
+
+
+GENRE vs MOOD WEIGHTING NOTE
+------------------------------
+Both genre and mood are used as hard filters (not soft scores) in this system.
+If they were ever relaxed to soft scores, mood should carry more weight (~65%)
+than genre (~35%), because mood reflects why the user is listening right now,
+while genre is a broader structural category that spans many moods.
