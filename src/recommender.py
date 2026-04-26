@@ -1,6 +1,6 @@
 import csv
 from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 @dataclass
 class Song:
@@ -23,12 +23,40 @@ class Song:
 class UserProfile:
     """
     Represents a user's taste preferences.
-    Required by tests/test_recommender.py
+
+    Field names mirror the dict-schema used by score_song / main.py so the two
+    APIs stay in sync. All fields are optional — leave a field unset (empty
+    string for categorical, None for numeric) to signal "no preference," and
+    score_song will skip it.
     """
-    favorite_genre: str
-    favorite_mood: str
-    target_energy: float
-    likes_acoustic: bool
+    genre: str = ""
+    mood: str = ""
+    energy: Optional[float] = None
+    tempo: Optional[float] = None
+    valence: Optional[float] = None
+    danceability: Optional[float] = None
+    acousticness: Optional[float] = None
+
+
+_NUMERIC_PROFILE_KEYS = ("energy", "tempo", "valence", "danceability", "acousticness")
+
+
+def _user_profile_to_prefs(user: "UserProfile") -> Dict:
+    """Convert a UserProfile into the dict shape expected by score_song.
+
+    Drops unset fields so score_song treats them as "no preference."
+    """
+    prefs: Dict = {}
+    if user.genre:
+        prefs["genre"] = user.genre
+    if user.mood:
+        prefs["mood"] = user.mood
+    for key in _NUMERIC_PROFILE_KEYS:
+        value = getattr(user, key)
+        if value is not None:
+            prefs[key] = value
+    return prefs
+
 
 class Recommender:
     """
@@ -41,13 +69,16 @@ class Recommender:
 
     def recommend(self, user: UserProfile, k: int = 5) -> List[Song]:
         """Return the top-k song recommendations for the given user profile."""
-        # TODO: Implement recommendation logic
-        return self.songs[:k]
+        prefs = _user_profile_to_prefs(user)
+        scored = [(song, score_song(asdict(song), prefs)[0]) for song in self.songs]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [song for song, _ in scored[:k]]
 
     def explain_recommendation(self, user: UserProfile, song: Song) -> str:
         """Return a human-readable explanation of why a song was recommended."""
-        # TODO: Implement explanation logic
-        return "Explanation placeholder"
+        prefs = _user_profile_to_prefs(user)
+        _, explanation = score_song(asdict(song), prefs)
+        return explanation
 
 def load_songs(csv_path: str) -> List[Dict]:
     """
@@ -100,6 +131,28 @@ WEIGHTS = {
     "danceability": 0.5,
 }
 
+# Categorical features: exact-string match → flat bonus.
+# (pref_key, song_key)
+_CATEGORICAL_FEATURES: List[Tuple[str, str]] = [
+    ("genre", "genre"),
+    ("mood",  "mood"),
+]
+
+# Numeric features: similarity = 1 - |song_val/norm - pref_val/norm|.
+# (pref_key, song_key, normalize, reason_threshold, unit_label)
+#   - normalize: divisor applied to both values before diffing (200 for tempo
+#     so its raw BPM doesn't dominate; 1.0 for already-0-to-1 features).
+#   - reason_threshold: similarity at/above which the feature is named in the
+#     explanation string.
+#   - unit_label: appended to the song value in the explanation (e.g. " BPM").
+_NUMERIC_FEATURES: List[Tuple[str, str, float, float, str]] = [
+    ("energy",       "energy",       1.0,   0.85, ""),
+    ("acousticness", "acousticness", 1.0,   0.85, ""),
+    ("valence",      "valence",      1.0,   0.85, ""),
+    ("tempo",        "tempo_bpm",    200.0, 0.90, " BPM"),
+    ("danceability", "danceability", 1.0,   0.85, ""),
+]
+
 
 def score_song(song: Dict, user_prefs: Dict) -> Tuple[float, str]:
     """
@@ -108,57 +161,27 @@ def score_song(song: Dict, user_prefs: Dict) -> Tuple[float, str]:
     Returns (score, explanation) where explanation names the top contributors.
     """
     score = 0.0
-    reasons = []
+    reasons: List[str] = []
 
-    # --- Step 1: Categorical bonuses (binary, additive) ---
-    if user_prefs.get("genre") and song.get("genre") == user_prefs["genre"]:
-        score += WEIGHTS["genre"]
-        reasons.append(f"genre match ({song['genre']}) (+{WEIGHTS['genre']})")
+    # Categorical bonuses (binary, additive).
+    for pref_key, song_key in _CATEGORICAL_FEATURES:
+        if user_prefs.get(pref_key) and song.get(song_key) == user_prefs[pref_key]:
+            weight = WEIGHTS[pref_key]
+            score += weight
+            reasons.append(f"{pref_key} match ({song[song_key]}) (+{weight})")
 
-    if user_prefs.get("mood") and song.get("mood") == user_prefs["mood"]:
-        score += WEIGHTS["mood"]
-        reasons.append(f"mood match ({song['mood']}) (+{WEIGHTS['mood']})")
-
-    # --- Step 2: Continuous similarity scoring ---
-    # similarity = 1.0 - |song_value - target_value|, then multiply by weight.
-
-    if "energy" in user_prefs:
-        sim = 1.0 - abs(song["energy"] - user_prefs["energy"])
-        contribution = WEIGHTS["energy"] * sim
+    # Numeric similarity contributions.
+    for pref_key, song_key, norm, threshold, unit in _NUMERIC_FEATURES:
+        if pref_key not in user_prefs:
+            continue
+        sim = 1.0 - abs(song[song_key] / norm - user_prefs[pref_key] / norm)
+        contribution = WEIGHTS[pref_key] * sim
         score += contribution
-        if sim >= 0.85:
-            reasons.append(f"energy close ({song['energy']}) (+{contribution:.2f})")
+        if sim >= threshold:
+            reasons.append(
+                f"{pref_key} close ({song[song_key]}{unit}) (+{contribution:.2f})"
+            )
 
-    if "acousticness" in user_prefs:
-        sim = 1.0 - abs(song["acousticness"] - user_prefs["acousticness"])
-        contribution = WEIGHTS["acousticness"] * sim
-        score += contribution
-        if sim >= 0.85:
-            reasons.append(f"acousticness close ({song['acousticness']}) (+{contribution:.2f})")
-
-    if "valence" in user_prefs:
-        sim = 1.0 - abs(song["valence"] - user_prefs["valence"])
-        contribution = WEIGHTS["valence"] * sim
-        score += contribution
-        if sim >= 0.85:
-            reasons.append(f"valence close ({song['valence']}) (+{contribution:.2f})")
-
-    if "tempo" in user_prefs:
-        # Normalize both values to 0–1 using 200 BPM as the practical ceiling.
-        sim = 1.0 - abs(song["tempo_bpm"] / 200.0 - user_prefs["tempo"] / 200.0)
-        contribution = WEIGHTS["tempo"] * sim
-        score += contribution
-        if sim >= 0.90:
-            reasons.append(f"tempo close ({song['tempo_bpm']} BPM) (+{contribution:.2f})")
-
-    if "danceability" in user_prefs:
-        sim = 1.0 - abs(song["danceability"] - user_prefs["danceability"])
-        contribution = WEIGHTS["danceability"] * sim
-        score += contribution
-        if sim >= 0.85:
-            reasons.append(f"danceability close ({song['danceability']}) (+{contribution:.2f})")
-
-    # --- Step 4: Explanation generation ---
     explanation = (
         "Matches your taste: " + ", ".join(reasons)
         if reasons
