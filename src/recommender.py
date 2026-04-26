@@ -2,6 +2,14 @@ import csv
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, asdict
 
+from loggings import get_logger
+
+logger = get_logger(__name__)
+
+# Numeric columns required on every CSV row. Missing or unparseable values
+# cause the row to be skipped (with a warning), not a hard crash.
+_REQUIRED_NUMERIC_FIELDS = ("energy", "tempo_bpm", "valence", "danceability", "acousticness")
+
 @dataclass
 class Song:
     """
@@ -83,20 +91,41 @@ class Recommender:
 def load_songs(csv_path: str) -> List[Dict]:
     """
     Loads songs from a CSV file.
-    Required by src/main.py
+
+    Logs progress via the project logger. A missing file raises
+    FileNotFoundError (the caller can't recover without one). Individual
+    malformed rows are logged as warnings and skipped, so one bad row
+    can't break the whole catalog.
     """
-    print(f"Loading songs from {csv_path}...")
-    songs = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
+    logger.info("Loading songs from %s", csv_path)
+
+    try:
+        f = open(csv_path, newline="", encoding="utf-8")
+    except FileNotFoundError:
+        logger.error("Songs CSV not found at %s", csv_path)
+        raise
+
+    songs: List[Dict] = []
+    skipped = 0
+
+    with f:
         reader = csv.DictReader(f)
-        for row in reader:
-            row["id"] = int(row["id"])
-            row["energy"] = float(row["energy"])
-            row["tempo_bpm"] = float(row["tempo_bpm"])
-            row["valence"] = float(row["valence"])
-            row["danceability"] = float(row["danceability"])
-            row["acousticness"] = float(row["acousticness"])
+        # line_no starts at 2 because line 1 is the header.
+        for line_no, row in enumerate(reader, start=2):
+            try:
+                row["id"] = int(row["id"])
+                for field in _REQUIRED_NUMERIC_FIELDS:
+                    row[field] = float(row[field])
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(
+                    "Skipping malformed row at line %d: %s (row=%r)",
+                    line_no, e, row,
+                )
+                skipped += 1
+                continue
             songs.append(row)
+
+    logger.info("Loaded %d songs (%d skipped)", len(songs), skipped)
     return songs
 
 

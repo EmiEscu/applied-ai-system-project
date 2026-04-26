@@ -11,6 +11,7 @@ You will implement the functions in recommender.py:
 
 import os
 from recommender import load_songs, recommend_songs
+from loggings import setup_logging
 
 
 def print_rankings(label: str, user_prefs: dict, songs: list, top_k: int = 5) -> None:
@@ -29,6 +30,7 @@ def print_rankings(label: str, user_prefs: dict, songs: list, top_k: int = 5) ->
 
 
 def main() -> None:
+    setup_logging()
     csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "songs.csv")
     songs = load_songs(csv_path)
 
