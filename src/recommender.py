@@ -1,4 +1,5 @@
 import csv
+from collections import Counter
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, asdict
 
@@ -75,12 +76,16 @@ class Recommender:
         """Initialize the recommender with a catalog of songs."""
         self.songs = songs
 
-    def recommend(self, user: UserProfile, k: int = 5) -> List[Song]:
+    def recommend(self, user: UserProfile, k: int = 5, diversity: float = 0.7) -> List[Song]:
         """Return the top-k song recommendations for the given user profile."""
         prefs = _user_profile_to_prefs(user)
-        scored = [(song, score_song(asdict(song), prefs)[0]) for song in self.songs]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return [song for song, _ in scored[:k]]
+        scored = [
+            (song, score_song(asdict(song), prefs)[0], "")
+            for song in self.songs
+        ]
+        scored.sort(key=lambda triple: triple[1], reverse=True)
+        reranked = _mmr_rerank(scored, k, diversity)
+        return [song for song, _, _ in reranked]
 
     def explain_recommendation(self, user: UserProfile, song: Song) -> str:
         """Return a human-readable explanation of why a song was recommended."""
@@ -132,23 +137,27 @@ def load_songs(csv_path: str) -> List[Dict]:
 # ---------------------------------------------------------------------------
 # Scoring weights — tuned against the 20-song dataset in data/songs.csv.
 #
-# Design rationale:
-#   - genre (2.0) and mood (1.5) are categorical exact-match bonuses.
-#     They're the strongest signals when they fire, but sparse (14 genres,
-#     15 moods across 20 songs), so numeric features must carry the load
-#     when there's no categorical match.
-#   - energy (1.5) has the widest useful spread (0.21–0.97) and is the
-#     single best numeric separator between genres.
+# How they're used:
+#   - genre and mood are categorical exact-match bonuses, added as flat amounts.
+#   - The numeric weights act as importance multipliers inside a *weighted*
+#     cosine similarity over the audio-feature vector. The cosine result
+#     (in [0,1]) is then scaled by the sum of active numeric weights, so the
+#     overall scoring scale matches the categorical bonuses and the
+#     theoretical max stays at WEIGHTS["genre"] + WEIGHTS["mood"] +
+#     sum(numeric_weights) ≈ 8.3.
+#
+# Per-feature rationale:
+#   - genre (2.0) and mood (1.5) are the strongest categorical signals when
+#     they fire, but sparse (14 genres, 15 moods across 20 songs).
+#   - energy (1.5) has the widest useful spread (0.21–0.97) — the single
+#     best numeric separator between genres.
 #   - acousticness (1.2) covers nearly the full 0–1 range and cleanly
 #     separates electric (rock/metal/electronic) from acoustic (folk/jazz/lofi).
-#   - valence (0.8) captures emotional tone but overlaps with mood labels,
-#     so it gets a moderate weight.
-#   - tempo (0.8) is normalized to 0–1 (÷200) before scoring; without
-#     normalization its raw BPM values (58–180) would dominate.
+#   - valence (0.8) captures emotional tone but overlaps with mood labels.
+#   - tempo (0.8) is normalized by 200 BPM before scoring so its raw range
+#     (58–180) doesn't dominate.
 #   - danceability (0.5) is the weakest separator — largely correlated
-#     with energy — so it gets the lowest weight.
-#
-# Max possible score ≈ 8.3 (all features perfectly matched).
+#     with energy.
 # ---------------------------------------------------------------------------
 WEIGHTS = {
     "genre":        2.0,
@@ -167,12 +176,14 @@ _CATEGORICAL_FEATURES: List[Tuple[str, str]] = [
     ("mood",  "mood"),
 ]
 
-# Numeric features: similarity = 1 - |song_val/norm - pref_val/norm|.
+# Numeric features used in the weighted-cosine similarity vector.
 # (pref_key, song_key, normalize, reason_threshold, unit_label)
-#   - normalize: divisor applied to both values before diffing (200 for tempo
-#     so its raw BPM doesn't dominate; 1.0 for already-0-to-1 features).
-#   - reason_threshold: similarity at/above which the feature is named in the
-#     explanation string.
+#   - normalize: divisor applied to both values before computing similarity
+#     (200 for tempo so its raw BPM range doesn't dominate the vector;
+#     1.0 for already-0-to-1 features).
+#   - reason_threshold: per-feature closeness (1 - |diff|/norm) at/above which
+#     the feature is named in the human-readable explanation string. This
+#     does NOT affect the score — it's purely for transparency.
 #   - unit_label: appended to the song value in the explanation (e.g. " BPM").
 _NUMERIC_FEATURES: List[Tuple[str, str, float, float, str]] = [
     ("energy",       "energy",       1.0,   0.85, ""),
@@ -183,11 +194,45 @@ _NUMERIC_FEATURES: List[Tuple[str, str, float, float, str]] = [
 ]
 
 
+def _song_pair_cosine(a: Dict, b: Dict) -> float:
+    """
+    Weighted cosine similarity between two SONGS — used by MMR to detect
+    near-duplicates in the candidate pool.
+
+    Cosine is fine here (not for user-vs-song scoring, see score_song's note)
+    because we're comparing two real catalog vectors against each other:
+    songs that point the same direction in feature space genuinely have the
+    same sonic *profile*, which is exactly what "near-duplicate" should mean.
+    """
+    dot = 0.0
+    a_sq = 0.0
+    b_sq = 0.0
+    for pref_key, song_key, norm, _, _ in _NUMERIC_FEATURES:
+        ai = a[song_key] / norm
+        bi = b[song_key] / norm
+        w = WEIGHTS[pref_key]
+        dot += w * ai * bi
+        a_sq += w * ai * ai
+        b_sq += w * bi * bi
+    denom = (a_sq ** 0.5) * (b_sq ** 0.5)
+    return dot / denom if denom > 0 else 0.0
+
+
 def score_song(song: Dict, user_prefs: Dict) -> Tuple[float, str]:
     """
     Scores a single song against the user taste profile.
 
-    Returns (score, explanation) where explanation names the top contributors.
+    Score = categorical bonuses (genre, mood — exact match)
+          + per-feature weighted similarity, where similarity_i = 1 - |u_i - s_i|.
+
+    Why not cosine for user-vs-song? Cosine measures *direction* in
+    feature space and ignores magnitude — so for non-negative features in
+    [0,1], a user vector of (1,1,1,1) looks ~95–100% similar to almost any
+    positive song vector, which is exactly what we don't want for
+    interpretable audio features. Per-feature absolute-difference respects
+    magnitude (0.5 is genuinely "halfway" to 1.0), so it's the right tool
+    here. Cosine is still used inside MMR for song-vs-song duplicate
+    detection — see _song_pair_cosine.
     """
     score = 0.0
     reasons: List[str] = []
@@ -199,7 +244,7 @@ def score_song(song: Dict, user_prefs: Dict) -> Tuple[float, str]:
             score += weight
             reasons.append(f"{pref_key} match ({song[song_key]}) (+{weight})")
 
-    # Numeric similarity contributions.
+    # Per-feature weighted similarity contributions.
     for pref_key, song_key, norm, threshold, unit in _NUMERIC_FEATURES:
         if pref_key not in user_prefs:
             continue
@@ -219,10 +264,86 @@ def score_song(song: Dict, user_prefs: Dict) -> Tuple[float, str]:
     return round(score, 3), explanation
 
 
-def recommend_songs(user_prefs: Dict, songs: List[Dict], k: int = 5) -> List[Tuple[Dict, float, str]]:
+def _mmr_rerank(
+    scored: List[Tuple[Dict, float, str]],
+    k: int,
+    diversity: float,
+) -> List[Tuple[Dict, float, str]]:
+    """
+    Re-rank scored candidates with Maximal Marginal Relevance.
+
+    At each step, picks the candidate that maximizes:
+        diversity * normalized_relevance - (1 - diversity) * max_sim_to_picked
+
+    diversity = 1.0 → pure relevance (no MMR effect; behaves like a top-k cut).
+    diversity = 0.7 (default) → relevance-heavy; mild penalty for near-duplicates.
+    diversity = 0.0 → ignore relevance, pick the most novel each step.
+
+    `scored` is expected to be sorted by relevance descending.
+    """
+    lam = max(0.0, min(1.0, diversity))
+    if lam >= 1.0 or k >= len(scored):
+        return scored[:k]
+
+    # Normalize relevance to [0,1] so it's on the same scale as cosine sim.
+    max_rel = max((rel for _, rel, _ in scored), default=0.0) or 1.0
+
+    remaining = list(scored)
+    selected: List[Tuple[Dict, float, str]] = []
+    while len(selected) < k and remaining:
+        best_idx = 0
+        best_mmr = -float("inf")
+        for i, (song, rel, _) in enumerate(remaining):
+            normalized_rel = rel / max_rel
+            if selected:
+                max_sim = max(_song_pair_cosine(song, s) for s, _, _ in selected)
+            else:
+                max_sim = 0.0
+            mmr = lam * normalized_rel - (1.0 - lam) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        selected.append(remaining.pop(best_idx))
+    return selected
+
+
+def profile_from_songs(songs: List[Dict]) -> Dict:
+    """
+    Derive a user_prefs dict by averaging audio features over a list of
+    "liked" songs and taking the modal genre / mood. This is the classic
+    content-based-filtering setup: the taste profile is a centroid of the
+    songs the user has already favorited.
+
+    Returns an empty dict for an empty input. The result is shaped to drop
+    straight into score_song / recommend_songs.
+    """
+    if not songs:
+        return {}
+
+    n = len(songs)
+    prefs: Dict = {
+        "energy":       sum(s["energy"]       for s in songs) / n,
+        "valence":      sum(s["valence"]      for s in songs) / n,
+        "danceability": sum(s["danceability"] for s in songs) / n,
+        "acousticness": sum(s["acousticness"] for s in songs) / n,
+        "tempo":        sum(s["tempo_bpm"]    for s in songs) / n,
+    }
+    prefs["genre"] = Counter(s["genre"] for s in songs).most_common(1)[0][0]
+    prefs["mood"]  = Counter(s["mood"]  for s in songs).most_common(1)[0][0]
+    return prefs
+
+
+def recommend_songs(
+    user_prefs: Dict,
+    songs: List[Dict],
+    k: int = 5,
+    diversity: float = 0.7,
+) -> List[Tuple[Dict, float, str]]:
     """
     Functional implementation of the recommendation logic.
-    Required by src/main.py
+
+    `diversity` is the MMR λ — see _mmr_rerank.
     """
     scored = [(song, *score_song(song, user_prefs)) for song in songs]
-    return sorted(scored, key=lambda x: x[1], reverse=True)[:k]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return _mmr_rerank(scored, k, diversity)

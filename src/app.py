@@ -4,10 +4,13 @@ Streamlit UI for the Music Recommender.
 Run with:
     streamlit run src/app.py
 
-The sidebar collects the user's taste profile (genre, mood, audio-feature
-sliders). The main panel shows the top-k matches with a percentage match,
-the genre/mood badges, and the same "why this matched" explanation that
-the CLI version produces.
+Two ways to build a taste profile:
+  - Manual sliders: pick a genre/mood and dial the audio-feature sliders.
+  - Liked songs:    pick a few songs you already like; the profile is the
+                    average of their feature vectors (true content-based UX).
+
+The main panel shows the top-k matches with percentage scores and the
+"why this matched" explanation.
 """
 import os
 import sys
@@ -20,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import streamlit as st
 
 from loggings import setup_logging
-from recommender import WEIGHTS, load_songs, recommend_songs
+from recommender import WEIGHTS, load_songs, profile_from_songs, recommend_songs
 
 setup_logging()
 
@@ -34,13 +37,7 @@ def get_songs():
 
 
 def max_possible_score(prefs: dict) -> float:
-    """
-    Theoretical maximum score given which preferences the user actually set.
-
-    Used to convert raw scores into a 0–100% match. Categorical features
-    only count when the user picked a non-empty value; numeric features
-    always count (the UI always provides a slider value).
-    """
+    """Theoretical maximum score given which preferences are set, for % scaling."""
     total = 0.0
     if prefs.get("genre"):
         total += WEIGHTS["genre"]
@@ -49,11 +46,30 @@ def max_possible_score(prefs: dict) -> float:
     for key in ("energy", "tempo", "valence", "danceability", "acousticness"):
         if key in prefs:
             total += WEIGHTS[key]
-    return total or 1.0  # avoid div-by-zero if literally nothing is set
+    return total or 1.0
 
 
-def render_sidebar(genres: list, moods: list) -> tuple[dict, int]:
-    """Render the input sidebar and return (user_prefs, k)."""
+def _song_label(song: dict) -> str:
+    return f"{song['title']} — {song['artist']} ({song['genre']})"
+
+
+def render_output_controls() -> tuple[int, float]:
+    """Sliders shared by both profile-building modes."""
+    st.sidebar.subheader("Output")
+    k = st.sidebar.slider("Number of recommendations", 1, 10, 5)
+    diversity = st.sidebar.slider(
+        "Diversity (1.0 = pure match · 0.0 = pure novelty)",
+        0.0, 1.0, 0.7, 0.05,
+        help=(
+            "Maximal Marginal Relevance λ. Lower values penalize picks that are "
+            "sonically too close to ones already chosen, breaking up filter bubbles."
+        ),
+    )
+    return k, diversity
+
+
+def render_manual_sidebar(genres: list, moods: list) -> dict:
+    """Manual mode: dropdowns + sliders → user_prefs dict."""
     st.sidebar.header("Your taste profile")
 
     genre = st.sidebar.selectbox(
@@ -74,10 +90,7 @@ def render_sidebar(genres: list, moods: list) -> tuple[dict, int]:
     acousticness = st.sidebar.slider("Acousticness", 0.0, 1.0, 0.5, 0.05)
     tempo = st.sidebar.slider("Tempo (BPM)", 60, 200, 120, 1)
 
-    st.sidebar.subheader("Output")
-    k = st.sidebar.slider("Number of recommendations", 1, 10, 5)
-
-    user_prefs = {
+    return {
         "genre": genre,
         "mood": mood,
         "energy": energy,
@@ -86,7 +99,34 @@ def render_sidebar(genres: list, moods: list) -> tuple[dict, int]:
         "acousticness": acousticness,
         "tempo": float(tempo),
     }
-    return user_prefs, k
+
+
+def render_liked_sidebar(songs: list) -> tuple[dict, list[int]]:
+    """Liked-songs mode: multiselect → averaged profile + selected ids."""
+    st.sidebar.header("Songs you like")
+    st.sidebar.caption(
+        "Pick a handful of tracks you already love. The profile is built from "
+        "the average of their audio features — Spotify-style content-based filtering."
+    )
+
+    songs_by_id = {s["id"]: s for s in songs}
+    liked_ids = st.sidebar.multiselect(
+        "Liked songs",
+        options=list(songs_by_id.keys()),
+        format_func=lambda sid: _song_label(songs_by_id[sid]),
+    )
+    liked = [songs_by_id[sid] for sid in liked_ids]
+    prefs = profile_from_songs(liked)
+
+    if liked:
+        with st.sidebar.expander("Derived profile", expanded=False):
+            st.write(
+                {k: (round(v, 2) if isinstance(v, float) else v) for k, v in prefs.items()}
+            )
+    else:
+        st.sidebar.info("Pick at least one song to generate recommendations.")
+
+    return prefs, liked_ids
 
 
 def render_results(results, max_score: float) -> None:
@@ -116,9 +156,29 @@ def main() -> None:
     genres = sorted({s["genre"] for s in songs})
     moods = sorted({s["mood"] for s in songs})
 
-    user_prefs, k = render_sidebar(genres, moods)
-    results = recommend_songs(user_prefs, songs, k=k)
-    max_score = max_possible_score(user_prefs)
+    mode = st.sidebar.radio(
+        "Build profile from",
+        options=["Manual sliders", "Liked songs"],
+        horizontal=True,
+    )
+    st.sidebar.divider()
+
+    liked_ids: list[int] = []
+    if mode == "Manual sliders":
+        prefs = render_manual_sidebar(genres, moods)
+    else:
+        prefs, liked_ids = render_liked_sidebar(songs)
+
+    st.sidebar.divider()
+    k, diversity = render_output_controls()
+
+    if not prefs:
+        st.info("👈 Pick at least one song in the sidebar to see recommendations.")
+        return
+
+    candidates = [s for s in songs if s["id"] not in liked_ids]
+    results = recommend_songs(prefs, candidates, k=k, diversity=diversity)
+    max_score = max_possible_score(prefs)
 
     st.subheader(f"Top {k} matches for your profile")
     render_results(results, max_score)
