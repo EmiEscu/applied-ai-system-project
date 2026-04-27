@@ -121,7 +121,15 @@ def render_results(
     results: list[tuple[Song, float, str]],
     max_score: float,
 ) -> None:
-    """Render the top-k recommendation cards."""
+    """
+    Render the top-k recommendation cards.
+
+    Percentages are *absolute* — each song is scored against the theoretical
+    perfect match for the user's profile (every feature exact, every
+    categorical choice matching). A song that lines up closely with the
+    slider values reads high; a poor numeric fit reads low, even if it
+    happens to be the best of a weak field.
+    """
     for rank, (song, score, explanation) in enumerate(results, start=1):
         pct = max(0, min(100, int(round(100 * score / max_score))))
         with st.container(border=True):
@@ -134,7 +142,7 @@ def render_results(
                 )
                 st.write(explanation)
             with right:
-                st.metric("Match", f"{pct}%")
+                st.metric("Recommendation", f"{pct}%")
                 st.progress(pct / 100)
 
 
@@ -171,7 +179,7 @@ def main() -> None:
     rec = Recommender(candidates)
     results = rec.rank(profile, k=k, diversity=diversity)
 
-    st.subheader(f"Top {k} matches for your profile")
+    st.subheader(f"Top {k} recommendations for your profile")
     render_results(results, max_possible_score(profile))
 
 
