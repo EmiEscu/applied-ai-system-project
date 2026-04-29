@@ -1,3 +1,6 @@
 pandas
 pytest
 streamlit
+requests
+google-genai
+python-dotenv
