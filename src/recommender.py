@@ -20,6 +20,10 @@ def load_songs(csv_path: str) -> List[Song]:
     """
     Load songs from a CSV file into Song objects.
 
+    Expects the Spotify audio-features schema (track_id, track_name,
+    track_artist, playlist_genre, danceability, energy, key, loudness, mode,
+    speechiness, acousticness, instrumentalness, liveness, valence, tempo).
+
     A missing file raises FileNotFoundError (the caller can't recover
     without one). Individual malformed rows are logged as warnings and
     skipped, so one bad row can't break the whole catalog.
@@ -41,16 +45,21 @@ def load_songs(csv_path: str) -> List[Song]:
         for line_no, row in enumerate(reader, start=2):
             try:
                 song = Song(
-                    id=int(row["id"]),
-                    title=row["title"],
-                    artist=row["artist"],
-                    genre=row["genre"],
-                    mood=row["mood"],
-                    energy=float(row["energy"]),
-                    tempo_bpm=float(row["tempo_bpm"]),
-                    valence=float(row["valence"]),
+                    id=row["track_id"],
+                    title=row["track_name"],
+                    artist=row["track_artist"],
+                    genre=row["playlist_genre"],
                     danceability=float(row["danceability"]),
+                    energy=float(row["energy"]),
+                    key=int(row["key"]),
+                    loudness=float(row["loudness"]),
+                    mode=int(row["mode"]),
+                    speechiness=float(row["speechiness"]),
                     acousticness=float(row["acousticness"]),
+                    instrumentalness=float(row["instrumentalness"]),
+                    liveness=float(row["liveness"]),
+                    valence=float(row["valence"]),
+                    tempo=float(row["tempo"]),
                 )
             except (KeyError, ValueError, TypeError) as e:
                 logger.warning(
@@ -68,8 +77,9 @@ def load_songs(csv_path: str) -> List[Song]:
 def profile_from_songs(songs: List[Song]) -> UserProfile:
     """
     Derive a UserProfile by averaging audio features over a list of "liked"
-    songs and taking the modal genre / mood. Classic content-based-filtering
-    setup — the taste profile is the centroid of the user's liked songs.
+    songs and taking the modal genre / key / mode. Classic content-based-
+    filtering setup — the taste profile is the centroid of the user's liked
+    songs.
 
     Returns a default (empty) UserProfile for an empty input.
     """
@@ -79,12 +89,17 @@ def profile_from_songs(songs: List[Song]) -> UserProfile:
     n = len(songs)
     return UserProfile(
         genre=Counter(s.genre for s in songs).most_common(1)[0][0],
-        mood=Counter(s.mood for s in songs).most_common(1)[0][0],
         energy=sum(s.energy for s in songs) / n,
         valence=sum(s.valence for s in songs) / n,
         danceability=sum(s.danceability for s in songs) / n,
         acousticness=sum(s.acousticness for s in songs) / n,
-        tempo=sum(s.tempo_bpm for s in songs) / n,
+        instrumentalness=sum(s.instrumentalness for s in songs) / n,
+        liveness=sum(s.liveness for s in songs) / n,
+        loudness=sum(s.loudness for s in songs) / n,
+        speechiness=sum(s.speechiness for s in songs) / n,
+        tempo=sum(s.tempo for s in songs) / n,
+        mode=Counter(s.mode for s in songs).most_common(1)[0][0],
+        key=Counter(s.key for s in songs).most_common(1)[0][0],
     )
 
 
@@ -110,10 +125,29 @@ class Recommender:
         Top-k matches as (song, score, explanation) triples.
 
         `diversity` is the MMR λ — see `scoring.mmr_rerank`.
+
+        The Spotify CSV has one row per (track, playlist) pair, *and*
+        Spotify assigns different track IDs to the same recording across
+        album editions, so the same song often appears several times. We
+        dedupe by `Song.dedup_key()` (lower-cased title+artist) *after*
+        scoring (keeping the highest-scoring copy) and *before* MMR. That
+        way each song competes fairly under whichever of its genre tags
+        matches the user's preference, but MMR sees one row per song and
+        can do diversity correctly.
         """
         scored = [(song, *score_song(song, user)) for song in self.songs]
         scored.sort(key=lambda triple: triple[1], reverse=True)
-        return mmr_rerank(scored, k, diversity)
+
+        seen: set = set()
+        unique: List[Tuple[Song, float, str]] = []
+        for triple in scored:
+            key = triple[0].dedup_key()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(triple)
+
+        return mmr_rerank(unique, k, diversity)
 
     def recommend(
         self,

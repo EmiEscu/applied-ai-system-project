@@ -15,65 +15,73 @@ from models import Song, UserProfile
 
 
 # ---------------------------------------------------------------------------
-# Scoring weights — tuned against the catalog in data/songs.csv.
+# Scoring weights — tuned for the Spotify audio-features schema.
 #
 # How they're used:
-#   - genre and mood are categorical exact-match bonuses, added as flat amounts.
-#   - The numeric weights are per-feature multipliers on a similarity term in
-#     [0,1]. Theoretical max score = WEIGHTS["genre"] + WEIGHTS["mood"]
-#     + sum(numeric_weights) ≈ 8.3 when every field is set and every feature
-#     matches perfectly.
+#   - Categorical features (genre, mode, key) are exact-match bonuses, added
+#     as flat amounts when both the song and profile values agree.
+#   - Numeric weights are per-feature multipliers on a similarity term in
+#     [0,1]. Theoretical max ≈ sum of all weights when every field is set
+#     and every feature matches perfectly.
 #
 # Per-feature rationale:
-#   - genre (2.0) and mood (1.5) are the strongest categorical signals when
-#     they fire, but sparse across the catalog.
-#   - energy (1.5) has the widest useful spread — the single best numeric
-#     separator between genres.
-#   - acousticness (1.2) covers nearly the full 0–1 range and cleanly
-#     separates electric (rock/metal/electronic) from acoustic (folk/jazz/lofi).
-#   - valence (0.8) captures emotional tone but overlaps with mood labels.
-#   - tempo (0.8) is normalized by 200 BPM before scoring so its raw range
-#     (58–180) doesn't dominate.
-#   - danceability (0.5) is the weakest separator — largely correlated
-#     with energy.
+#   - genre (2.0) is the strongest categorical signal.
+#   - energy (1.5) is the widest useful numeric separator across genres.
+#   - acousticness (1.2) cleanly separates electric from acoustic music.
+#   - valence (0.8) captures emotional positivity.
+#   - tempo (0.8) is normalized by 140 BPM (60–200 slider range).
+#   - instrumentalness (0.8) splits vocal pop/rap from instrumental tracks.
+#   - loudness (0.6) — production-loudness signal, normalized by 60 dB.
+#   - danceability (0.5) is largely correlated with energy.
+#   - speechiness (0.4) flags rap / spoken word.
+#   - liveness (0.4) flags live recordings.
+#   - mode (0.4) major vs minor — categorical exact match.
+#   - key (0.3) musical key — categorical exact match.
 # ---------------------------------------------------------------------------
 WEIGHTS = {
-    "genre":        2.0,
-    "mood":         1.5,
-    "energy":       1.5,
-    "acousticness": 1.2,
-    "valence":      0.8,
-    "tempo":        0.8,
-    "danceability": 0.5,
+    "genre":            2.0,
+    "energy":           1.5,
+    "acousticness":     1.2,
+    "valence":          0.8,
+    "tempo":            0.8,
+    "instrumentalness": 0.8,
+    "loudness":         0.6,
+    "danceability":     0.5,
+    "speechiness":      0.4,
+    "liveness":         0.4,
+    "mode":             0.4,
+    "key":              0.3,
 }
 
-# Categorical features: exact-string match → flat bonus.
+# Categorical features: exact-value match → flat bonus.
 # (profile_attr, song_attr)
 _CATEGORICAL_FEATURES: List[Tuple[str, str]] = [
     ("genre", "genre"),
-    ("mood",  "mood"),
+    ("mode",  "mode"),
+    ("key",   "key"),
 ]
 
 # Numeric features used in per-feature weighted similarity.
 # (profile_attr, song_attr, normalize, reason_threshold, unit_label)
 #   - normalize: divisor applied to |u - s| before computing similarity, so
 #     every feature's similarity lands in [0,1]. For 0–1 features this is 1.0.
-#     For tempo, the slider spans 60–200 BPM (a 140-BPM range), so we normalize
-#     by 140 — that way a 70-BPM gap reads as sim=0.5 ("halfway off"), matching
-#     the intuition for the other sliders. Earlier this was 200, which silently
-#     squeezed tempo similarity into [0.30, 1.00] and made tempo's 0.8 weight
-#     act more like 0.25 in practice.
-#   - reason_threshold: legacy field, kept for backward compatibility. The
-#     explanation now uses global tier thresholds (_STRONG_SIM, _CLOSE_SIM)
-#     in score_song rather than per-feature thresholds.
-#   - unit_label: legacy field. Per-feature formatting lives in
-#     `_format_numeric` now.
+#     - tempo: slider spans 60–200 BPM (a 140-BPM range), normalize by 140 so
+#       a 70-BPM gap reads as sim=0.5.
+#     - loudness: typical Spotify range is roughly -60..0 dB, normalize by 60
+#       so a 30-dB gap reads as sim=0.5.
+#   - reason_threshold: legacy field, kept for compatibility.
+#   - unit_label: legacy field, per-feature formatting now lives in
+#     `_format_numeric`.
 _NUMERIC_FEATURES: List[Tuple[str, str, float, float, str]] = [
-    ("energy",       "energy",       1.0,   0.85, ""),
-    ("acousticness", "acousticness", 1.0,   0.85, ""),
-    ("valence",      "valence",      1.0,   0.85, ""),
-    ("tempo",        "tempo_bpm",    140.0, 0.90, " BPM"),
-    ("danceability", "danceability", 1.0,   0.85, ""),
+    ("energy",           "energy",           1.0,   0.85, ""),
+    ("acousticness",     "acousticness",     1.0,   0.85, ""),
+    ("valence",          "valence",          1.0,   0.85, ""),
+    ("tempo",            "tempo",            140.0, 0.90, " BPM"),
+    ("instrumentalness", "instrumentalness", 1.0,   0.85, ""),
+    ("loudness",         "loudness",         60.0,  0.85, " dB"),
+    ("danceability",     "danceability",     1.0,   0.85, ""),
+    ("speechiness",      "speechiness",      1.0,   0.85, ""),
+    ("liveness",         "liveness",         1.0,   0.85, ""),
 ]
 
 
@@ -81,19 +89,33 @@ _STRONG_SIM = 0.85    # numeric features at/above this are "strongly aligned"
 _CLOSE_SIM = 0.60     # 0.60–0.85 is "close"; below 0.60 is "differs"
 
 
+_KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
 def _format_numeric(u_key: str, s_val: float, u_val: float) -> str:
     """Human-readable 'song value vs your value' string for one numeric feature."""
     if u_key == "tempo":
         return f"tempo ({int(s_val)} BPM vs your {int(u_val)} BPM)"
+    if u_key == "loudness":
+        return f"loudness ({s_val:.1f} dB vs your {u_val:.1f} dB)"
     return f"{u_key} ({s_val:.2f} vs your {u_val:.2f})"
+
+
+def _format_categorical(u_key: str, val) -> str:
+    """Human-readable label for a categorical feature value."""
+    if u_key == "mode":
+        return "major" if val == 1 else "minor"
+    if u_key == "key" and isinstance(val, int) and 0 <= val < 12:
+        return _KEY_NAMES[val]
+    return str(val)
 
 
 def score_song(song: Song, user: UserProfile) -> Tuple[float, str]:
     """
     Score one song against a user's taste profile.
 
-    Score = categorical bonuses (genre, mood — exact match)
-          + per-feature weighted similarity, where similarity_i = 1 - |u_i - s_i|.
+    Score = categorical bonuses (genre, mode, key — exact match)
+          + per-feature weighted similarity, where similarity_i = 1 - |u_i - s_i|/norm.
 
     The explanation groups features into three tiers so the user can see
     *why* a song was picked and which preferences didn't quite line up:
@@ -115,21 +137,25 @@ def score_song(song: Song, user: UserProfile) -> Tuple[float, str]:
 
     for u_key, s_key in _CATEGORICAL_FEATURES:
         u_val = getattr(user, u_key)
-        if not u_val:
+        # Treat "" and None as "not set." 0 is a valid mode/key value.
+        if u_val is None or u_val == "":
             continue
         s_val = getattr(song, s_key)
         if s_val == u_val:
             score += WEIGHTS[u_key]
-            strong.append(f"{u_key} match ({u_val})")
+            strong.append(f"{u_key} match ({_format_categorical(u_key, u_val)})")
         else:
-            differs.append(f"{u_key} ({s_val}, you wanted {u_val})")
+            differs.append(
+                f"{u_key} ({_format_categorical(u_key, s_val)}, "
+                f"you wanted {_format_categorical(u_key, u_val)})"
+            )
 
     for u_key, s_key, norm, _, _ in _NUMERIC_FEATURES:
         u_val = getattr(user, u_key)
         if u_val is None:
             continue
         s_val = getattr(song, s_key)
-        sim = max(0.0, 1.0 - abs(s_val / norm - u_val / norm))
+        sim = max(0.0, 1.0 - abs(s_val - u_val) / norm)
         score += WEIGHTS[u_key] * sim
 
         label = _format_numeric(u_key, s_val, u_val)
@@ -162,8 +188,10 @@ def max_possible_score(user: UserProfile) -> float:
     total = 0.0
     if user.genre:
         total += WEIGHTS["genre"]
-    if user.mood:
-        total += WEIGHTS["mood"]
+    if user.mode is not None:
+        total += WEIGHTS["mode"]
+    if user.key is not None:
+        total += WEIGHTS["key"]
     for u_key, _, _, _, _ in _NUMERIC_FEATURES:
         if getattr(user, u_key) is not None:
             total += WEIGHTS[u_key]
