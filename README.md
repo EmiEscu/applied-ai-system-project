@@ -14,6 +14,16 @@ Goals:
 
 ---
 
+## Demo
+
+Walkthrough of the app and the three profile modes:
+
+[![Music Recommender Demo](https://img.youtube.com/vi/ieWK0tLvIjw/maxresdefault.jpg)](https://youtu.be/ieWK0tLvIjw)
+
+▶️ [Watch on YouTube](https://youtu.be/ieWK0tLvIjw)
+
+---
+
 ## What's New (vs. the starter project)
 
 | Area | Starter version | Current version |
